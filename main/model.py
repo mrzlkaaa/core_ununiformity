@@ -4,6 +4,8 @@ from re import search
 from main import burnup
 from typing import Iterable
 from joblib import load
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import numpy as np
 import pandas as pd
 import random
@@ -98,11 +100,11 @@ class Individual:
 
     @staticmethod
     def _fuels_gnome_refactorer(
-        cls,
+        cls: object,
         fuels_gnome: np.ndarray
     ):
         '''
-        #* Makes DataFrame from array
+        #* Makes DataFrame from an array
         #* Refactorization required to use non-inofromity
         #* regression model that accepts labeled data
         #* The input X for a model is
@@ -143,10 +145,14 @@ class Individual:
             burnup_data.append(burnt)
             left_data.append(265 - burnt)
 
-        df.loc[0, :] = [*burnup_data, *left_data]        
+        df.loc[0, :] = [
+            *burnup_data, 
+            *left_data
+        ]        
 
         return df
 
+    #! suppressed
     def count_matched_cells(
         self,
         cells1,
@@ -207,14 +213,35 @@ class Individual:
     def initialize_chromosome(
         self,
         fuels_gnome: np.ndarray,
-        id_num: int,
+        id_num: int = 0,
         **kwargs
     ):
         '''
-        #* Method description
+        #* Main method of class to initialize
+        #* chromosome gnomes
+        #* Method accepts the < fuels_gnome > array as a basis
+        #* argument to initialize gnomes
+        #* One of the most important part is
+        #* generation of non-uniformity coefficients for a
+        #* given array. Based on generated coefsefficients
+        #* Following gnomes initializes:
+        #*  k_fa_max - most stressful fuel assembly
+        #*  k_fa_min - less stressful fuel assembly
+        #*  k_quarters - by qurter averaged non-uniformity coef
+        #*      in a range from 0 to  1
+        #*  k_sym - coef of symmetry between pairwised cells
+        #*      that shows how differ / close pairwised cells to each other
+        #*      in a range from 0 to 1
+        #*  fitness_score - score of chromosome to evaluate it during population
+        #*      assessment step
         #* Parameters
         #* ----------
-        #*
+        #*  fuels_gnome: np.ndarray
+        #*      fuel burnup map (7-6 to 2-3 cells)
+        #*  id_num: int
+        #*      identificator number of a chromosome
+        #*      uses to provide unique number / gnome to a chromosome
+        #*      This number helps to modify / replace existing chromosome 
         #* Raises
         #* ----------
         #*
@@ -259,23 +286,23 @@ class Individual:
         k_quarter = np.mean(list(map(lambda x: x if x <= 1 else 1 - ( x - 1 ), k_quarter)))
 
         sym_coefs = [
-            fuels_non_uniformity[0] / fuels_non_uniformity[16],
-            fuels_non_uniformity[1] / fuels_non_uniformity[18],
-            fuels_non_uniformity[2] / fuels_non_uniformity[17],
-            fuels_non_uniformity[3] / fuels_non_uniformity[19],
-            fuels_non_uniformity[8] / fuels_non_uniformity[10],
-            fuels_non_uniformity[9] / fuels_non_uniformity[11],
+            fuels_non_uniformity[0] / fuels_non_uniformity[16],  #* 7-6 and 2-6
+            fuels_non_uniformity[1] / fuels_non_uniformity[18],  #* 7-5 and 2-4
+            fuels_non_uniformity[2] / fuels_non_uniformity[17],  #* 7-4 and 2-5
+            fuels_non_uniformity[3] / fuels_non_uniformity[19],  #* 7-3 and 2-3
+            fuels_non_uniformity[8] / fuels_non_uniformity[10],  #* 5-6 and 4-6
+            fuels_non_uniformity[9] / fuels_non_uniformity[11],  #* 5-3 and 4-3
             
         ]
         sym_coefs = np.mean(list(map(lambda x: x if x <= 1 else 1 - ( x - 1 ), sym_coefs)))
 
         sym_burnup = [
-            fuels_gnome[0] - fuels_gnome[16],
-            fuels_gnome[1] - fuels_gnome[18],
-            fuels_gnome[2] - fuels_gnome[17],
-            fuels_gnome[3] - fuels_gnome[19],
-            fuels_gnome[8] - fuels_gnome[10],
-            fuels_gnome[9] - fuels_gnome[11]
+            fuels_gnome[0] - fuels_gnome[16],  #* 7-6 and 2-6 
+            fuels_gnome[1] - fuels_gnome[18],  #* 7-5 and 2-4
+            fuels_gnome[2] - fuels_gnome[17],  #* 7-4 and 2-5
+            fuels_gnome[3] - fuels_gnome[19],  #* 7-3 and 2-3
+            fuels_gnome[8] - fuels_gnome[10],  #* 5-6 and 4-6
+            fuels_gnome[9] - fuels_gnome[11]   #* 5-3 and 4-3
         ]
         sym_burnup = np.mean(list(map(lambda x: np.power(1.05, 0) / np.power(1.05, abs(x)), sym_burnup)))
         
@@ -393,6 +420,7 @@ class GA:
         mate_probability: float = 0.2,
         elitism:float = 0.1,
         fintess_weights: dict = FITNESS_WEIGHTS_WINDOW,
+        workers: int = 1
         
         # population: Iterable
 
@@ -400,6 +428,7 @@ class GA:
         self.ancestor_core = core
         self.fuel_map = fuel_map
         self.dynamic_fuels_gnome_ind, self.dynamic_fuels_gnome = self._find_fuel_gnome(core, fuel_map)
+        self.workers = workers
 
         self.indiv = Individual(
             fuel_map,
@@ -428,7 +457,8 @@ class GA:
         permutation_mutation_probability:float = 0.1,
         mate_probability: float = 0.2,
         elitism:float = 0.1,
-        fintess_weights: dict = FITNESS_WEIGHTS_WINDOW
+        fintess_weights: dict = FITNESS_WEIGHTS_WINDOW,
+        workers:int = 1
     ):
         fuel_map = [
             1 if i == 300 else 0 for i in fuel_map
@@ -442,7 +472,8 @@ class GA:
             permutation_mutation_probability,
             mate_probability,
             elitism,
-            fintess_weights
+            fintess_weights,
+            workers
         )
 
     def _find_fuel_gnome(
@@ -795,17 +826,28 @@ class GA:
 
     def make_population(self):
         
-        #todo can be speeded up
-        population = []
-        for i in range(self.population_size):
-            mutated_fuels_gnome = self.indiv.fuels_gnome_mutation(self.ancestor_core)
-            population.append(
-                self.indiv.initialize_chromosome(
-                    mutated_fuels_gnome,
-                    i+1
+        with ProcessPoolExecutor(max_workers=self.workers) as executor:
+            #todo can be speeded up
+            population = []
+        
+            mutated_cores = [self.indiv.fuels_gnome_mutation(self.ancestor_core) for _ in range(self.population_size)]
+            futures = [
+                executor.submit(self.indiv.initialize_chromosome, mutated_fuels_gnome, i+1) for i, mutated_fuels_gnome in enumerate(mutated_cores)
+            ]
+            for future in as_completed(futures):
+                
+                population.append(
+                    future.result()
                 )
-            )
-        population.sort(reverse=True, key=self._fitness_score)
+            # for i in range(self.population_size):
+            #     mutated_fuels_gnome = self.indiv.fuels_gnome_mutation(self.ancestor_core)
+            #     population.append(
+            #         self.indiv.initialize_chromosome(
+            #             mutated_fuels_gnome,
+            #             i+1
+            #         )
+            #     )
+            population.sort(reverse=True, key=self._fitness_score)
         return population
 
     def search(
@@ -894,7 +936,7 @@ class GA:
                     best_in_family
                 )
             
-            #*** mutation
+            #*** permutation mutation part
             permutation_mutation_number = math.ceil(
                 self._initilize_mutation_probability(generation)
                 *len(population)
@@ -912,6 +954,7 @@ class GA:
                     [mutated_chromo]
                 )
 
+            #* fresh fuel mutation part
             fresh_fuel_mutation_number = math.ceil(
                 self._initilize_fresh_fuel_probability_exp(population_burnup)
                 *len(population)

@@ -18,7 +18,6 @@ cycler==0.11.0
 debugpy==1.8.0
 decorator==5.1.1
 defusedxml==0.7.1
-ensemble_ml @ file:///mnt/c/Users/Nikita/Desktop/codes/ML/IRTT_reactor/core_uniniformity/ensemble_ml-0.0.1-py3-none-any.whl
 et-xmlfile==1.1.0
 exceptiongroup==1.2.0
 executing==1.2.0

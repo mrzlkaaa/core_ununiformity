@@ -136,7 +136,8 @@ def ga():
         core=fresh_fuel_test['fuels_gnome'],
         fuel_map=fuel_map,
         population_size=40,
-        refuel_only=[0, 10] #* refuel only provided
+        refuel_only=[0, 10],  #* refuel only provided
+        workers=8
     )
 
 def test_find_fuel_gnome(ga):
