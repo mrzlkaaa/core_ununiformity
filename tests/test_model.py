@@ -109,7 +109,7 @@ chromo2 = {
 }
 
 
-fresh_fuel_test =  {
+fresh_fuel_test_1 =  {
     'id': 0,
     'fuels_gnome': np.array([
         63.65, 13.93, 3.02, 46.18, 
@@ -129,14 +129,52 @@ fresh_fuel_test =  {
 }
 
 
+fresh_fuel_test_2 =  {
+    'id': 0,
+    'fuels_gnome': np.array([
+        63.65, 13.93, 3.02, 46.18, 
+        61.33, 22.97, 48.86, 55.61, 
+        26.14, 33.11, 
+        59.51, 33.05, 
+        59.02, 44.45, 22.89, 52.94, 
+        61.72, 5.78, 13.69, 45.26
+    ]),
+    'core_burnup': 37.6,
+    'p_margin': 4.78612546174803,
+    'k_fa_max': 1.3474877200592554,
+    'k_fa_min': 0.619508928948087,
+    'k_left_right': 0.8231629459866739,
+    'k_sym': 0.8029373242713104,
+    'fitness_score': 0.7319066213673546
+}
+
+fresh_fuel_test_3 =  {
+    'id': 0,
+    'fuels_gnome': np.array([
+        2.01, 63.93, 3.02, 46.18, 
+        61.33, 22.97, 48.86, 55.61, 
+        26.14, 33.11, 
+        59.51, 33.05, 
+        59.02, 44.45, 22.89, 52.94, 
+        1.72, 15.78, 63.69, 45.26
+    ]),
+    'core_burnup': 37.6,
+    'p_margin': 4.78612546174803,
+    'k_fa_max': 1.3474877200592554,
+    'k_fa_min': 0.619508928948087,
+    'k_left_right': 0.8231629459866739,
+    'k_sym': 0.8029373242713104,
+    'fitness_score': 0.7319066213673546
+}
 
 @pytest.fixture
 def ga():
     return GA.no_fuel_mask(
-        core=fresh_fuel_test['fuels_gnome'],
+        core=fresh_fuel_test_3['fuels_gnome'],
         fuel_map=fuel_map,
         population_size=40,
-        refuel_only=[0, 10],  #* refuel only provided
+        full_symmetry=False,
+        # refuel_only=[0, 10],  #* refuel only provided
         workers=8
     )
 
@@ -163,13 +201,9 @@ def test_permutation_mutation(ga):
     assert 0
 
 def test_fresh_fuel_mutation(ga):
-    res = ga.fresh_fuel_mutation(fresh_fuel_test)
-    #* imitation of mutation of core
-    #* but class stores cell value that must be refueled
-    res["fuels_gnome"][10] = 3.02
-    res["fuels_gnome"][2] = 59.51
-    res = ga.fresh_fuel_mutation(res)
-    print(res)
+    res = ga.fresh_fuel_mutation(fresh_fuel_test_3)
+    
+    print(res["fuels_gnome"])
     assert 0
 
 def test_mate(ga):

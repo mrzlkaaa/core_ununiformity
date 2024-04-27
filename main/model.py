@@ -5,13 +5,16 @@ from main import burnup
 from typing import Iterable
 from joblib import load
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Lock
 
 import numpy as np
 import pandas as pd
 import random
 import math
+import concurrent.futures
 
 from regression.stacking import Stacking
+
 
 try:
     from . import *
@@ -19,24 +22,27 @@ except ImportError:
     from main import *
 
 core_parts = init_core_parts()
+lock = Lock()
 
 #! dependency afctually
 #* passing models as class variables
-pmargin = load("pmargin_v0.1.joblib")
-nonuniformity = load("new_stack_unifor_v1.0.joblib")
+pmargin = load("pmargin_v1.0.joblib")
+nonuniformity = load("new_stack_unifor_v1.5.joblib")
+#* column transformere required
+# nonuniformity_no_ensemble = load("GPR_model.joblib")
 
 # FITNESS_WEIGHTS_WINDOW = [
-#     0.40,    #* margin
-#     0.15,    #* k_fa_max
-#     0.10,    #* k_left_right
-#     0.35     #* k_sym
+#     0.40,    
+#     0.15,    
+#     0.10,    
+#     0.35     
 # ]
 
 FITNESS_WEIGHTS_WINDOW = {
-    "p_margin": 0.25,
-    "k_fa_max": 0.25,
-    "k_quarter": 0.25,
-    "k_sym": 0.25
+    "p_margin": 0.25,    #* margin
+    "k_fa_max": 0.25,    #* k_fa_max
+    "k_quarter": 0.25,   #* k_left_right
+    "k_sym": 0.25        #* k_sym
 }
 
 TARGET = [
@@ -253,8 +259,8 @@ class Individual:
         #* Generates chromosome data for an ancestor
         #* structure of chromosome
         #* [
-        #*  p, k_fa_max, k_fa_min, k_left, k_right, avb,
-        #*  fuel_burnup_map  
+        #*      p, k_fa_max, k_fa_min, k_left, k_right, avb,
+        #*      fuel_burnup_map  
         #* ]
 
         core_burnup = self.round_float(fuels_gnome.mean()) 
@@ -310,7 +316,18 @@ class Individual:
             # fuels_non_uniformity[core_parts["index"]["USYMM"]].mean() / fuels_non_uniformity[core_parts["index"]["LSYMM"]].mean()
         
         refactored_fuels_gnome.loc[:, "average_l"] = refactored_fuels_gnome.loc[:, core_parts["left"]["ALL_CELLS"]].mean(axis=1)
-        p_margin = pmargin.predict(refactored_fuels_gnome.loc[:, [*core_parts["left"]["ALL_CELLS"], "average_l"]])[0]
+        refactored_fuels_gnome.loc[:, "average_b"] = refactored_fuels_gnome.loc[:, core_parts["burnup"]["ALL_CELLS"]].mean(axis=1)
+        p_margin = pmargin.predict(
+            refactored_fuels_gnome.loc[
+                :, 
+                [
+                    *core_parts["left"]["ALL_CELLS"], 
+                    "average_l",
+                    "average_b"
+                ]
+            ]
+        )[0]
+        
         #! symmetry in terms of fuel burnup to help find pair more correct 
 
         fitness_score = self.fitness_score(
@@ -334,6 +351,7 @@ class Individual:
             "k_fa_min": k_fa_min,
             "k_quarter": k_quarter,
             "k_sym" : k_sym,
+            "k_left_right": k_left_right,
             "fitness_score": fitness_score
         }
 
@@ -371,7 +389,6 @@ class Individual:
         else:
             p_margin_norm = p_margin / TARGET[0]
         
-        
         #* k_fa_max normalizations
         if k_fa_max < 1.2:
             k_fa_max = 1.2
@@ -395,7 +412,7 @@ class Individual:
         #* normalize to exponential decrease in a scale of [ 0, 1 ]
         k_sym_norm = np.exp( ( k_sym_norm - 1) )
         # k_sym_norm = k_sym / LIMITS[3] if k_sym <= 1 else ( 1 / k_sym ) / LIMITS[3]
-            
+        
         return p_margin_norm * cls.fintess_weights["p_margin"]\
             + k_fa_max_norm * cls.fintess_weights["k_fa_max"]\
             + k_quarter_norm * cls.fintess_weights["k_quarter"]\
@@ -415,6 +432,7 @@ class GA:
         fuel_map: list,  #* map shows where 8th/6th tube FA are installed
         population_size: int,
         refuel_only: list | None = None,  #* restrict cells avaliable for refueling
+        full_symmetry: bool = True,  #* allows refueling for pairwised cells only
         mutation_probabilty_fresh_fuel: float = 0.1,
         permutation_mutation_probability:float = 0.1,
         mate_probability: float = 0.2,
@@ -438,6 +456,7 @@ class GA:
         #* find and store values in a given cells
         #* to refuel exactly given one
         self.refuel_only = np.asarray(self.ancestor_core)[np.asarray(refuel_only)] if refuel_only is not None else None
+        self.full_symmetry = full_symmetry
         
         self.population_size = population_size
         self.mutation_probabilty_fresh_fuel = mutation_probabilty_fresh_fuel
@@ -453,6 +472,7 @@ class GA:
         fuel_map,
         population_size,
         refuel_only: list | None = None,
+        full_symmetry: bool = True,
         mutation_probabilty_fresh_fuel: float = 0.1,
         permutation_mutation_probability:float = 0.1,
         mate_probability: float = 0.2,
@@ -460,20 +480,22 @@ class GA:
         fintess_weights: dict = FITNESS_WEIGHTS_WINDOW,
         workers:int = 1
     ):
+        print(fintess_weights)
         fuel_map = [
             1 if i == 300 else 0 for i in fuel_map
         ]
         return cls(
-            core, 
-            fuel_map,
-            population_size,
-            refuel_only,
-            mutation_probabilty_fresh_fuel,
-            permutation_mutation_probability,
-            mate_probability,
-            elitism,
-            fintess_weights,
-            workers
+            core=core, 
+            fuel_map=fuel_map,
+            population_size=population_size,
+            refuel_only=refuel_only,
+            full_symmetry=full_symmetry,
+            mutation_probabilty_fresh_fuel=mutation_probabilty_fresh_fuel,
+            permutation_mutation_probability=permutation_mutation_probability,
+            mate_probability=mate_probability,
+            elitism=elitism,
+            fintess_weights=fintess_weights,
+            workers=workers
         )
 
     def _find_fuel_gnome(
@@ -586,27 +608,78 @@ class GA:
         if not len(cells) > 0:
             return chromosome
 
+        
         #* to enable 6th tube refueling 
         #* pairwise refueling required
         max_burnup = fuels_gnome[cells].max()
         max_burnup_pos = list(fuels_gnome).index(max_burnup)
 
+        #* full_symmetry means that all cells in a core have pair
+        #! BUT symmetric of FAs can be broken due to this method
+        #! accepts metated cores -> refueling of 8th tube FA by index is forbidden 
+        #* Refeuling of symmetric 8th tubes MUST BE implemeted by values only
+        #* if full_symmetry is False only 6th tube FA are considered as pairwised
+        if self.full_symmetry:
+            pairwised_cells = [
+                *core_parts["index"]["PAIRWISED_RODS"]["CELLS"], 
+                *core_parts["index"]["PAIRWISED_SYMM"]["CELLS"]
+            ]
+            pairwised_pairs = [
+                *core_parts["index"]["PAIRWISED_RODS"]["PAIRS"], 
+                *core_parts["index"]["PAIRWISED_SYMM"]["PAIRS"]
+            ]
+        else:
+            pairwised_cells = core_parts["index"]["PAIRWISED_RODS"]["CELLS"]
+            pairwised_pairs = core_parts["index"]["PAIRWISED_RODS"]["PAIRS"]
+        
         #* need to check whether cell is pairwised
         #* if cell in a array of pairwised cells
         #* loop over pair to get cell to refuel
-        if max_burnup_pos in core_parts["index"]["PAIRWISED_RODS"]["CELLS"]:
-            for v in core_parts["index"]["PAIRWISED_RODS"]["PAIRS"]:
+        if max_burnup_pos in pairwised_cells and not self.full_symmetry:
+            for v in pairwised_pairs:
                 if max_burnup_pos in v:
+                    #* repcale both FAs by fresh ones based on indexes
                     fuels_gnome[np.array(v)] = 0.0
                     break
+        
+        #* finds true pair of max_burnup FA by checking ancestor_core
+        #* applicable for both 6th and 8th tube FAs
+        elif self.full_symmetry:
+            #* finds max_burnup FA in ancestor's core
+            max_burnup_pos = list(self.ancestor_core).index(max_burnup)
+            max_burnup_pair_pos_ancestor = []
+
+            #* search for an unchanged pair of max_burnup
+            #* stores indexes of pairs
+            for pair in pairwised_pairs:
+                if max_burnup_pos in pair:
+                    max_burnup_pair_pos_ancestor = pair
+                    break
+            #* retrieving of values of pair
+            max_burnup_pair = self.ancestor_core[max_burnup_pair_pos_ancestor]
+
+            #* do search for rettieved values in fuel_gnome 
+            #* and store new positions
+            max_burnup_pair_pos = []
+            for val in max_burnup_pair:
+                
+                true_pos = list(fuels_gnome).index(val)
+                
+                max_burnup_pair_pos.append(
+                    true_pos
+                )
+
+            #* refueling of a pair of FAs
+            fuels_gnome[max_burnup_pair_pos] = 0.0
+
         #* refuel not pairwised cell
         else:
             fuels_gnome[max_burnup_pos] = 0.0
         
         #* ! future look up !
         #* to prevent new cores creation with average burnup < 28
-        #* The first condition check the given
-        #* chromosome burnup. But what if the core
+        #* The first condition checks burnup of a given
+        #* chromosome. But what if the core
         #* passes condinion and fresh fuel installed
         #* and at the end we see that average burnup is under 28%
         #* So it is actually breaks the logic
@@ -631,7 +704,7 @@ class GA:
     ):
         mutated_fuels_gnome = self.indiv.fuels_gnome_mutation(
             ancestor=chromosome["fuels_gnome"],
-            mutation_points=3
+            mutation_points=6
         )
 
         #* some recursion to prevent returning of duplicate from mutation
@@ -734,6 +807,18 @@ class GA:
         chromosome1,
         chromosome2
     ):
+        '''
+        #* Method description
+        #* Parameters
+        #* ----------
+        #*
+        #* Raises
+        #* ----------
+        #*
+        #* Returns
+        #* ----------
+        #*
+        '''
         p1 = chromosome1["fuels_gnome"]
         p2 = chromosome2["fuels_gnome"]
 
@@ -806,8 +891,41 @@ class GA:
     def _replace_chromosomes(
         self,
         population: list,
-        chromosomes: list
+        chromosomes: list | dict
     ):
+        '''
+        #* Internal method to replace chromosomes
+        #* in population
+        #* It is used to keep population size same 
+        #* during search (evolution) process
+        #* That is why bad chromosome replaces by good one
+        #* but ID of chromosome keeps untouched
+        #* Population and candidates (chromosomes) passes to a method
+        #* Then searches for candidate's ID in population and replace
+        #* these chromosomes by candidates (chromosomes)
+        #* Parameters
+        #* ----------
+        #*  population: list
+        #*      population of chromosomes where to seek
+        #*      for candidate's (chromosomes) ID
+        #*  chromosomes: list | dict
+        #*      candidates to replace bad chromosomes in a given population
+        #*      Replacement based on ID's search
+        #* Raises
+        #* ----------
+        #*  None
+        #* Returns
+        #* ----------
+        #*  population: list
+        #*      population with replaced chromosomes (updated population)
+        '''
+        #* copy to prevent inplace replacement
+        population = population.copy()
+        
+        #* if the only one chromosome is passed to func
+        if not isinstance(chromosomes, list):
+            chromosomes = [chromosomes]
+
         #* getting ids of given chromosomes
         ids = list(map(lambda x: x["id"], chromosomes))
         #* getting ids of population
@@ -825,12 +943,26 @@ class GA:
         
 
     def make_population(self):
-        
+        '''
+        #* Makes initial population of chromosomes
+        #* Ansestor core is a basis to create all initial
+        #* chromosomes. Chromosomes create via random self.fuels_gnome_mutation
+        #* List sorts by fitness score to be used correctly in search process
+        #* Parameters
+        #* ----------
+        #*  None
+        #* Raises
+        #* ----------
+        #*  None
+        #* Returns
+        #* ----------
+        #* population: list
+        '''
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
             #todo can be speeded up
             population = []
-        
             mutated_cores = [self.indiv.fuels_gnome_mutation(self.ancestor_core) for _ in range(self.population_size)]
+            # print(mutated_cores)
             futures = [
                 executor.submit(self.indiv.initialize_chromosome, mutated_fuels_gnome, i+1) for i, mutated_fuels_gnome in enumerate(mutated_cores)
             ]
@@ -852,9 +984,10 @@ class GA:
 
     def search(
         self,
-        generations=100,
-        ind_score=0.95,
-        population_score=0.90
+        generations:int = 100,
+        max_generations:int = 500,
+        ind_score:float = 0.95,
+        population_score:float = 0.90
         
     ):
         
@@ -870,119 +1003,155 @@ class GA:
 
         search = True
         generation = 1
-        while search:
+        try:
+            while search:
 
-            
-            if population[0]["fitness_score"] >= ind_score \
-                or score_population >= population_score:
-                print(population[0]["fitness_score"])
-                break
-            elif generation == generations and generations < 500:
-                generations += 10
-            elif generations >= 500:
-                break
-
-            new_generation = []
-            population_burnup = self._get_population_average(population, "core_burnup")
-
-            # #* shows how ids distibuted in population
-            # population_chromosomes_id = list(map(lambda x: x["id"], population))
-
-            best_fit_number = math.ceil(self.elitism*len(population))
-            # print(f"{best_fit_number} goes next")
-            # print(population[:best_fit_number])
-            #* population of new_generation array
-            new_generation.extend(population[:best_fit_number])
-
-            #* drop chromosomes that goes next round
-            population = population[best_fit_number: ]
-
-            #*** matting
-            mate_size = math.ceil(self.mate_probability*len(population))
-            if not mate_size % 2 == 0:
-                mate_size += 1
-            
-            #* choices method allows repetitions in return
-            #* list is shuffled
-            to_mate_chromosomes = random.choices(
-                population,
-                k=mate_size
-            )
-            parents_split = int(mate_size/2)
-            
-            #todo can be speeded up
-            for p1, p2 in zip(
-                to_mate_chromosomes[ :parents_split], 
-                to_mate_chromosomes[parents_split: ]
-            ):
-                #* copies to prevent overwriting real objects
-                offspring = self.mate(
-                    p1.copy(),
-                    p2.copy()
-                )
-                if offspring is None:
-                    continue
+                if population[0]["fitness_score"] >= ind_score \
+                    or score_population >= population_score:
+                    print(population[0]["fitness_score"])
+                    break
+                elif generations >= max_generations:
+                    break
+                elif generation == generations and generations < max_generations:
+                    generations += 10
                 
-                family = [
-                    p1.copy(),
-                    p2.copy(),
-                    offspring    
-                ]
+
+                new_generation = []
+                population_burnup = self._get_population_average(population, "core_burnup")
+
+                # #* shows how ids distibuted in population
+                # population_chromosomes_id = list(map(lambda x: x["id"], population))
+
+                best_fit_number = math.ceil(self.elitism*len(population))
+                # print(f"{best_fit_number} goes next")
+                # print(population[:best_fit_number])
+                #* population of new_generation array
+                new_generation.extend(population[:best_fit_number])
+
+                #* drop chromosomes that goes next round
+                population = population[best_fit_number: ]
+
+                #*** matting
+                mate_size = math.ceil(self.mate_probability*len(population))
+                if not mate_size % 2 == 0:
+                    mate_size += 1
                 
-                best_in_family = self.mate_tournament_selection(family)
+                #* choices method allows repetitions in return
+                #* list is shuffled
+                to_mate_chromosomes = random.choices(
+                    population,
+                    k=mate_size
+                )
+                parents_split = int(mate_size/2)
                 
-                population = self._replace_chromosomes(
-                    population,
-                    best_in_family
+                #todo can be speeded up
+                with ProcessPoolExecutor(max_workers=self.workers) as executor:
+                    ps = tuple(zip(
+                        to_mate_chromosomes[ :parents_split], 
+                        to_mate_chromosomes[parents_split: ]
+                    ))
+                    ps_futures = [
+                        executor.submit(self.mate, p1.copy(), p2.copy()) for p1, p2 in ps
+                    ]
+                    
+                    for ps_future, (p1, p2) in zip(concurrent.futures.as_completed(ps_futures), ps):
+                        offspring = ps_future.result()
+                        # print(offspring)
+                        
+                        with lock:
+                            if offspring is None:
+                                continue
+                            
+                            
+                            family = [
+                                p1.copy(),
+                                p2.copy(),
+                                offspring    
+                            ]
+                            
+                            best_in_family = self.mate_tournament_selection(family)
+                            
+                            population = self._replace_chromosomes(
+                                population,
+                                best_in_family
+                            )
+                #todo 
+
+                # for p1, p2 in zip(
+                #     to_mate_chromosomes[ :parents_split], 
+                #     to_mate_chromosomes[parents_split: ]
+                # ):
+                #     #* copies to prevent overwriting real objects
+                #     offspring = self.mate(
+                #         p1.copy(),
+                #         p2.copy()
+                #     )
+                #     if offspring is None:
+                #         continue
+                    
+                #     family = [
+                #         p1.copy(),
+                #         p2.copy(),
+                #         offspring    
+                #     ]
+                    
+                #     best_in_family = self.mate_tournament_selection(family)
+                    
+                #     population = self._replace_chromosomes(
+                #         population,
+                #         best_in_family
+                #     )
+                
+                #*** permutation mutation part
+                permutation_mutation_number = math.ceil(
+                    self._initilize_mutation_probability(generation)
+                    *len(population)
                 )
-            
-            #*** permutation mutation part
-            permutation_mutation_number = math.ceil(
-                self._initilize_mutation_probability(generation)
-                *len(population)
-            )
 
-            to_permutate_chromosomes = random.sample(
-                population,
-                k=permutation_mutation_number
-            )
-
-            for chromo in to_permutate_chromosomes:
-                mutated_chromo = self.permutation_mutation(chromo)
-                population = self._replace_chromosomes(
+                to_permutate_chromosomes = random.sample(
                     population,
-                    [mutated_chromo]
+                    k=permutation_mutation_number
                 )
 
-            #* fresh fuel mutation part
-            fresh_fuel_mutation_number = math.ceil(
-                self._initilize_fresh_fuel_probability_exp(population_burnup)
-                *len(population)
-            )
+                for chromo in to_permutate_chromosomes:
+                    mutated_chromo = self.permutation_mutation(chromo)
+                    population = self._replace_chromosomes(
+                        population,
+                        mutated_chromo
+                    )
 
-            to_fresh_fuel_mutation = random.sample(
-                population,
-                k=fresh_fuel_mutation_number
-            )
-
-            for chromo in to_fresh_fuel_mutation:
-                fresh_chromo = self.fresh_fuel_mutation(chromo)
-                population = self._replace_chromosomes(
-                    population,
-                    [fresh_chromo]
+                #* fresh fuel mutation part
+                fresh_fuel_mutation_number = math.ceil(
+                    self._initilize_fresh_fuel_probability_exp(population_burnup)
+                    *len(population)
                 )
-            
-            new_generation.extend(population)
-            population = new_generation
 
-            population.sort(reverse=True, key=self._fitness_score)
+                to_fresh_fuel_mutation = random.sample(
+                    population,
+                    k=fresh_fuel_mutation_number
+                )
 
-            score_population = self._get_population_average(population, 'fitness_score')
-            burnup_population = self._get_population_average(population, 'core_burnup')
-            print(f"average populations score {score_population}"
-            + f" and burnup {burnup_population} at the end of {generation} generation")
-             
+                for chromo in to_fresh_fuel_mutation:
+                    fresh_chromo = self.fresh_fuel_mutation(chromo)
+                    population = self._replace_chromosomes(
+                        population,
+                        fresh_chromo
+                    )
+                
+                new_generation.extend(population)
+                population = new_generation
 
-            generation += 1
+                population.sort(reverse=True, key=self._fitness_score)
 
+                score_population = self._get_population_average(population, 'fitness_score')
+                burnup_population = self._get_population_average(population, 'core_burnup')
+                print(f"average populations score {score_population}"
+                + f" and burnup {burnup_population} at the end of {generation} generation")
+                
+
+                generation += 1
+        except KeyboardInterrupt:
+            #* returns population whenever KeyboardInterrupt raises
+            return population    
+        
         return population
