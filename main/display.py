@@ -41,10 +41,12 @@ class Display(Cartogram):
             case "f":
                 config = self.CORE_MAP.get("full")
                 core = np.full((self.R, self.C), np.nan)
+                # core = np.full((self.R, self.C), "Be") #* color map is not avaliable that way
                 rows, cols = self.ROWS_F, self.COLUMNS_F
             case "q":
                 config = self.CORE_MAP.get("quarter")
                 core = np.full((self.R1, self.C1), np.nan) 
+                # core = np.full((self.R1, self.C1), "Be") #* color map is not avaliable that way
                 rows, cols = self.ROWS_Q, self.COLUMNS_Q
 
         return config, core, rows, cols

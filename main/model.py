@@ -12,6 +12,7 @@ import pandas as pd
 import random
 import math
 import concurrent.futures
+import time
 
 from regression.stacking import Stacking
 
@@ -317,6 +318,7 @@ class Individual:
         
         refactored_fuels_gnome.loc[:, "average_l"] = refactored_fuels_gnome.loc[:, core_parts["left"]["ALL_CELLS"]].mean(axis=1)
         refactored_fuels_gnome.loc[:, "average_b"] = refactored_fuels_gnome.loc[:, core_parts["burnup"]["ALL_CELLS"]].mean(axis=1)
+        #* predicting of p_margin
         p_margin = pmargin.predict(
             refactored_fuels_gnome.loc[
                 :, 
@@ -330,7 +332,14 @@ class Individual:
         
         #! symmetry in terms of fuel burnup to help find pair more correct 
 
-        fitness_score = self.fitness_score(
+        (
+            fitness_score,
+            p_margin,
+            k_fa_max,
+            k_quarter,
+            k_sym
+
+        ) = self.fitness_score(
             self,
             p_margin,
             k_fa_max,
@@ -389,9 +398,9 @@ class Individual:
         else:
             p_margin_norm = p_margin / TARGET[0]
         
-        #* k_fa_max normalizations
-        if k_fa_max < 1.2:
-            k_fa_max = 1.2
+        # #* k_fa_max normalizations
+        # if k_fa_max < 1.2:
+        #     k_fa_max = 1.2
 
         if k_fa_max < TARGET[1]:
             k_fa_max_norm = 1 / ( k_fa_max / TARGET[1] )
@@ -413,10 +422,16 @@ class Individual:
         k_sym_norm = np.exp( ( k_sym_norm - 1) )
         # k_sym_norm = k_sym / LIMITS[3] if k_sym <= 1 else ( 1 / k_sym ) / LIMITS[3]
         
-        return p_margin_norm * cls.fintess_weights["p_margin"]\
+        return (
+            p_margin_norm * cls.fintess_weights["p_margin"]\
             + k_fa_max_norm * cls.fintess_weights["k_fa_max"]\
             + k_quarter_norm * cls.fintess_weights["k_quarter"]\
-            + k_sym_norm * cls.fintess_weights["k_sym"]
+            + k_sym_norm * cls.fintess_weights["k_sym"],
+            p_margin_norm,
+            k_fa_max_norm,
+            k_quarter_norm,
+            k_sym_norm
+        )
 
 #! provide max_worker argument
 #* this will speed up the prediction models work
@@ -464,6 +479,9 @@ class GA:
         self.mate_probability = mate_probability
         self.elitism = elitism
         
+
+        self._best_per_iter = []
+        self._aver_score_per_iter = []
     
     @classmethod
     def no_fuel_mask(
@@ -1015,6 +1033,15 @@ class GA:
                 elif generation == generations and generations < max_generations:
                     generations += 10
                 
+                st_time = time.time()
+                #* saving best solution
+                self._best_per_iter.append(
+                    population[0].copy()
+                )
+
+                self._aver_score_per_iter.append(
+                    self._get_population_average(population, 'fitness_score')
+                )
 
                 new_generation = []
                 population_burnup = self._get_population_average(population, "core_burnup")
@@ -1150,6 +1177,11 @@ class GA:
                 
 
                 generation += 1
+
+                fn_time = time.time() - st_time
+
+                print(fn_time)
+
         except KeyboardInterrupt:
             #* returns population whenever KeyboardInterrupt raises
             return population    
