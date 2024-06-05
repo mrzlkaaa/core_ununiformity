@@ -40,15 +40,17 @@ nonuniformity = load("new_stack_unifor_v1.5.joblib")
 # ]
 
 FITNESS_WEIGHTS_WINDOW = {
-    "p_margin": 0.25,    #* margin
-    "k_fa_max": 0.25,    #* k_fa_max
-    "k_quarter": 0.25,   #* k_left_right
-    "k_sym": 0.25        #* k_sym
+    "p_margin": 0.20,    #* margin
+    "k_fa_max": 0.20,    #* k_fa_max
+    "k_quarter": 0.20,   #* k_left_right
+    "k_sym": 0.20,       #* k_sym
+    "k_sided": 0.20      #* k_sided 
 }
 
 TARGET = [
     9,
-    1.4,
+    1.2,
+    1,
     1,
     1
 ] 
@@ -89,7 +91,7 @@ class Individual:
         #* it's array of indexes where 8th tube FA is installed
         self._dynamic_fuels_gnome_ind = np.asarray(dynamic_fuels_gnome_ind)
 
-        self.fintess_weights = fitness_weights if fitness_weights \
+        self.fitness_weights = fitness_weights if fitness_weights \
             else FITNESS_WEIGHTS_WINDOW
         
 
@@ -269,8 +271,6 @@ class Individual:
         refactored_fuels_gnome = self._fuels_gnome_refactorer(self, fuels_gnome)
         fuels_non_uniformity = Stacking.predict(refactored_fuels_gnome, nonuniformity).to_numpy()[0]
         k_fa_max, k_fa_min = fuels_non_uniformity.max(), fuels_non_uniformity.min()
-        #! fix this as it's done for k_sym
-        k_left_right = fuels_non_uniformity[core_parts["index"]["LEFT_CENTER_SIDE"]].mean() / fuels_non_uniformity[core_parts["index"]["RIGHT_CENTER_SIDE"]].mean()
         
         k_quarters = [
             fuels_non_uniformity[core_parts["index"]["QUL"]].mean(), 
@@ -299,6 +299,9 @@ class Individual:
             fuels_non_uniformity[3] / fuels_non_uniformity[19],  #* 7-3 and 2-3
             fuels_non_uniformity[8] / fuels_non_uniformity[10],  #* 5-6 and 4-6
             fuels_non_uniformity[9] / fuels_non_uniformity[11],  #* 5-3 and 4-3
+
+            # fuels_non_uniformity[1] / fuels_non_uniformity[17],  #* 7-5 and 2-5
+            # fuels_non_uniformity[2] / fuels_non_uniformity[18],  #* 7-4 and 2-4
             
         ]
         sym_coefs = np.mean(list(map(lambda x: x if x <= 1 else 1 - ( x - 1 ), sym_coefs)))
@@ -310,14 +313,22 @@ class Individual:
             fuels_gnome[3] - fuels_gnome[19],  #* 7-3 and 2-3
             fuels_gnome[8] - fuels_gnome[10],  #* 5-6 and 4-6
             fuels_gnome[9] - fuels_gnome[11]   #* 5-3 and 4-3
+
+            # fuels_gnome[1] - fuels_gnome[17],  #* 7-5 and 2-5
+            # fuels_gnome[2] - fuels_gnome[18],  #* 7-4 and 2-4
         ]
         sym_burnup = np.mean(list(map(lambda x: np.power(1.05, 0) / np.power(1.05, abs(x)), sym_burnup)))
         
         k_sym = np.array([sym_coefs, sym_burnup]).mean()
             # fuels_non_uniformity[core_parts["index"]["USYMM"]].mean() / fuels_non_uniformity[core_parts["index"]["LSYMM"]].mean()
         
+        #! fix this as it's done for k_sym
+        k_left_right = fuels_non_uniformity[core_parts["index"]["LEFT_CENTER_SIDE"]].mean() / fuels_non_uniformity[core_parts["index"]["RIGHT_CENTER_SIDE"]].mean()
+        k_left_right = k_left_right if k_left_right < 1 else 2 - k_left_right
+
         refactored_fuels_gnome.loc[:, "average_l"] = refactored_fuels_gnome.loc[:, core_parts["left"]["ALL_CELLS"]].mean(axis=1)
         refactored_fuels_gnome.loc[:, "average_b"] = refactored_fuels_gnome.loc[:, core_parts["burnup"]["ALL_CELLS"]].mean(axis=1)
+        
         #* predicting of p_margin
         p_margin = pmargin.predict(
             refactored_fuels_gnome.loc[
@@ -344,7 +355,8 @@ class Individual:
             p_margin,
             k_fa_max,
             k_quarter,
-            k_sym
+            k_sym,
+            k_left_right
         )
 
         #* now i need to call some model to get 
@@ -370,7 +382,8 @@ class Individual:
         p_margin: float,
         k_fa_max: float,
         k_quarter: float,
-        k_sym: float
+        k_sym: float,
+        k_sided: float
 
     ) -> float:
         '''
@@ -402,15 +415,10 @@ class Individual:
         # if k_fa_max < 1.2:
         #     k_fa_max = 1.2
 
-        if k_fa_max < TARGET[1]:
-            k_fa_max_norm = 1 / ( k_fa_max / TARGET[1] )
-        
-        else:
-            #* 1 / ( k_fa_max / TARGET[1] ) is scale factor because
-            #*  exp result in a range of [ 0, 1 ]
-            #* exp is used to make k_fa_max coef to decrease rapidly
-            k_fa_max_norm = 1 / ( k_fa_max / TARGET[1] ) * np.exp(-5 * ( k_fa_max - TARGET[1]) )
-        
+        k_fa_max_norm = k_fa_max / TARGET[1]
+        k_fa_max_norm = k_fa_max_norm if k_fa_max_norm < 1 else 2 - k_fa_max_norm
+        #* normalize to exponential decrease in a scale of [ 0, 1 ]
+        # k_fa_max_norm = np.exp( ( k_fa_max_norm - 1) )
 
         #* k_quarter processing
         k_quarter_norm = k_quarter / TARGET[2] # if k_quarter <= 1 else ( 1 / k_quarter ) / TARGET[2] 
@@ -421,12 +429,17 @@ class Individual:
         #* normalize to exponential decrease in a scale of [ 0, 1 ]
         k_sym_norm = np.exp( ( k_sym_norm - 1) )
         # k_sym_norm = k_sym / LIMITS[3] if k_sym <= 1 else ( 1 / k_sym ) / LIMITS[3]
-        
+        #* normalize to exponential decrease in a scale of [ 0, 1 ]
+        k_sided_norm = k_sided / TARGET[4]
+        k_sided_norm = np.exp( ( k_sided_norm - 1) )
+
+
         return (
-            p_margin_norm * cls.fintess_weights["p_margin"]\
-            + k_fa_max_norm * cls.fintess_weights["k_fa_max"]\
-            + k_quarter_norm * cls.fintess_weights["k_quarter"]\
-            + k_sym_norm * cls.fintess_weights["k_sym"],
+            p_margin_norm * cls.fitness_weights["p_margin"]\
+            + k_fa_max_norm * cls.fitness_weights["k_fa_max"]\
+            + k_quarter_norm * cls.fitness_weights["k_quarter"]\
+            + k_sym_norm * cls.fitness_weights["k_sym"]\
+            + k_sided_norm * cls.fitness_weights["k_sided"],
             p_margin_norm,
             k_fa_max_norm,
             k_quarter_norm,
@@ -452,7 +465,7 @@ class GA:
         permutation_mutation_probability:float = 0.1,
         mate_probability: float = 0.2,
         elitism:float = 0.1,
-        fintess_weights: dict = FITNESS_WEIGHTS_WINDOW,
+        fitness_weights: dict = FITNESS_WEIGHTS_WINDOW,
         workers: int = 1
         
         # population: Iterable
@@ -466,7 +479,7 @@ class GA:
         self.indiv = Individual(
             fuel_map,
             self.dynamic_fuels_gnome_ind,
-            fintess_weights
+            fitness_weights
         )
         #* find and store values in a given cells
         #* to refuel exactly given one
@@ -495,10 +508,10 @@ class GA:
         permutation_mutation_probability:float = 0.1,
         mate_probability: float = 0.2,
         elitism:float = 0.1,
-        fintess_weights: dict = FITNESS_WEIGHTS_WINDOW,
+        fitness_weights: dict = FITNESS_WEIGHTS_WINDOW,
         workers:int = 1
     ):
-        print(fintess_weights)
+        print(fitness_weights)
         fuel_map = [
             1 if i == 300 else 0 for i in fuel_map
         ]
@@ -512,7 +525,7 @@ class GA:
             permutation_mutation_probability=permutation_mutation_probability,
             mate_probability=mate_probability,
             elitism=elitism,
-            fintess_weights=fintess_weights,
+            fitness_weights=fitness_weights,
             workers=workers
         )
 
@@ -1102,33 +1115,7 @@ class GA:
                                 population,
                                 best_in_family
                             )
-                #todo 
-
-                # for p1, p2 in zip(
-                #     to_mate_chromosomes[ :parents_split], 
-                #     to_mate_chromosomes[parents_split: ]
-                # ):
-                #     #* copies to prevent overwriting real objects
-                #     offspring = self.mate(
-                #         p1.copy(),
-                #         p2.copy()
-                #     )
-                #     if offspring is None:
-                #         continue
-                    
-                #     family = [
-                #         p1.copy(),
-                #         p2.copy(),
-                #         offspring    
-                #     ]
-                    
-                #     best_in_family = self.mate_tournament_selection(family)
-                    
-                #     population = self._replace_chromosomes(
-                #         population,
-                #         best_in_family
-                #     )
-                
+                                
                 #*** permutation mutation part
                 permutation_mutation_number = math.ceil(
                     self._initilize_mutation_probability(generation)
