@@ -1,11 +1,13 @@
 
 
 from re import search
+from threading import active_count
 from main import burnup
 from typing import Iterable
 from joblib import load
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import Lock
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -13,6 +15,7 @@ import random
 import math
 import concurrent.futures
 import time
+import uuid
 
 from regression.stacking import Stacking
 
@@ -222,7 +225,7 @@ class Individual:
     def initialize_chromosome(
         self,
         fuels_gnome: np.ndarray,
-        id_num: int = 0,
+        id_num: str | None = None,
         **kwargs
     ):
         '''
@@ -265,6 +268,9 @@ class Individual:
         #*      p, k_fa_max, k_fa_min, k_left, k_right, avb,
         #*      fuel_burnup_map  
         #* ]
+
+        if id_num is None:
+            id_num = uuid.uuid4().hex
 
         core_burnup = self.round_float(fuels_gnome.mean()) 
         #* parameters of fuels_gnome
@@ -376,6 +382,7 @@ class Individual:
             "fitness_score": fitness_score
         }
 
+    #* single objective optimization case
     @staticmethod
     def fitness_score(
         cls,
@@ -458,7 +465,7 @@ class GA:
         self,
         core: list,  #* it's array size of 20
         fuel_map: list,  #* map shows where 8th/6th tube FA are installed
-        population_size: int,
+        population_size: int = 100,
         refuel_only: list | None = None,  #* restrict cells avaliable for refueling
         full_symmetry: bool = True,  #* allows refueling for pairwised cells only
         mutation_probabilty_fresh_fuel: float = 0.1,
@@ -474,6 +481,7 @@ class GA:
         self.ancestor_core = core
         self.fuel_map = fuel_map
         self.dynamic_fuels_gnome_ind, self.dynamic_fuels_gnome = self._find_fuel_gnome(core, fuel_map)
+        self.staic_fuels_gnome_ind, self.staic_fuels_gnome = self._find_fuel_gnome(core, fuel_map, False)
         self.workers = workers
 
         self.indiv = Individual(
@@ -499,46 +507,33 @@ class GA:
     @classmethod
     def no_fuel_mask(
         cls,
-        core,
-        fuel_map,
-        population_size,
-        refuel_only: list | None = None,
-        full_symmetry: bool = True,
-        mutation_probabilty_fresh_fuel: float = 0.1,
-        permutation_mutation_probability:float = 0.1,
-        mate_probability: float = 0.2,
-        elitism:float = 0.1,
-        fitness_weights: dict = FITNESS_WEIGHTS_WINDOW,
-        workers:int = 1
+        core:list,
+        fuel_map:list,
+        **kwargs:dict
     ):
-        print(fitness_weights)
         fuel_map = [
             1 if i == 300 else 0 for i in fuel_map
         ]
         return cls(
             core=core, 
             fuel_map=fuel_map,
-            population_size=population_size,
-            refuel_only=refuel_only,
-            full_symmetry=full_symmetry,
-            mutation_probabilty_fresh_fuel=mutation_probabilty_fresh_fuel,
-            permutation_mutation_probability=permutation_mutation_probability,
-            mate_probability=mate_probability,
-            elitism=elitism,
-            fitness_weights=fitness_weights,
-            workers=workers
+            **kwargs,
         )
 
     def _find_fuel_gnome(
         self,
-        core,
-        fuel_map
+        core:list,
+        fuel_map:list,
+        dynamic:bool = True
     ):
         indexes = []
         fuels = []
 
         for n,i in enumerate(fuel_map):
-            if i:
+            if i and dynamic:
+                indexes.append(n)
+                fuels.append(core[n])
+            elif not i and not dynamic:
                 indexes.append(n)
                 fuels.append(core[n])
 
@@ -601,6 +596,7 @@ class GA:
         return ( (1/np.power(1.5, generation)) / (1/np.power(1.5, 1)) ) * self.permutation_mutation_probability
 
     
+    #* inherited
     def fresh_fuel_mutation(
         self,
         chromosome:dict,
@@ -643,6 +639,7 @@ class GA:
         #* to enable 6th tube refueling 
         #* pairwise refueling required
         max_burnup = fuels_gnome[cells].max()
+
         max_burnup_pos = list(fuels_gnome).index(max_burnup)
 
         #* full_symmetry means that all cells in a core have pair
@@ -689,12 +686,18 @@ class GA:
             #* retrieving of values of pair
             max_burnup_pair = self.ancestor_core[max_burnup_pair_pos_ancestor]
 
+            # if list(max_burnup_pair) not in list(fuels_gnome):
+            #     return chromosome
             #* do search for rettieved values in fuel_gnome 
             #* and store new positions
             max_burnup_pair_pos = []
             for val in max_burnup_pair:
                 
                 true_pos = list(fuels_gnome).index(val)
+                # try:
+                #     true_pos = list(fuels_gnome).index(val)
+                # except ValueError:
+                #     return chromosome
                 
                 max_burnup_pair_pos.append(
                     true_pos
@@ -792,11 +795,11 @@ class GA:
 
     def _block_fuel_gnome(
         self,
-        val,
-        offspring,
-        occupied_gnomes,
-        p1,  #* parent whose gnome was not taken for offspring
-        p2   #* parent who was choosen to take a gnome
+        val:float,
+        offspring:np.ndarray,
+        occupied_gnomes:list,
+        p1:np.ndarray,  #* parent whose gnome was not taken for offspring
+        p2:np.ndarray,  #* parent who was choosen to take a gnome
     ):
         '''
         #* Special method that used during matting
@@ -833,6 +836,7 @@ class GA:
 
         return offspring, occupied_gnomes
     
+    #* inherited
     def mate(
         self,
         chromosome1,
@@ -911,14 +915,20 @@ class GA:
             for i in ind:
                 offspring[i] = 0.0
 
+        # if not set(list(offspring)) == set(self.ancestor_core):
+        #     raise ValueError("Offspring generated after matting has missing FAs")
+        
         offspring_chromosome = self.indiv.initialize_chromosome(
             offspring,
-            id_num=0,
         )
+
+        if not offspring_chromosome["core_burnup"] == chromosome1["core_burnup"]:
+            raise ValueError("Offspring generated after matting has missing FAs")
 
         return offspring_chromosome
 
 
+    #! simple ga
     def _replace_chromosomes(
         self,
         population: list,
@@ -972,7 +982,7 @@ class GA:
         return population 
 
         
-
+    #* inherited
     def make_population(self):
         '''
         #* Makes initial population of chromosomes
@@ -995,21 +1005,13 @@ class GA:
             mutated_cores = [self.indiv.fuels_gnome_mutation(self.ancestor_core) for _ in range(self.population_size)]
             # print(mutated_cores)
             futures = [
-                executor.submit(self.indiv.initialize_chromosome, mutated_fuels_gnome, i+1) for i, mutated_fuels_gnome in enumerate(mutated_cores)
+                executor.submit(self.indiv.initialize_chromosome, mutated_fuels_gnome) for _, mutated_fuels_gnome in enumerate(mutated_cores)
             ]
             for future in as_completed(futures):
                 
                 population.append(
                     future.result()
                 )
-            # for i in range(self.population_size):
-            #     mutated_fuels_gnome = self.indiv.fuels_gnome_mutation(self.ancestor_core)
-            #     population.append(
-            #         self.indiv.initialize_chromosome(
-            #             mutated_fuels_gnome,
-            #             i+1
-            #         )
-            #     )
             population.sort(reverse=True, key=self._fitness_score)
         return population
 
@@ -1168,6 +1170,442 @@ class GA:
                 fn_time = time.time() - st_time
 
                 print(fn_time)
+
+        except KeyboardInterrupt:
+            #* returns population whenever KeyboardInterrupt raises
+            return population    
+        
+        return population
+
+
+
+
+
+
+
+class SimpleGA(GA):
+    '''
+   #* Simple Genetic Algorithm which is developed
+   #* to solve single objective optimization task
+   #* Attributes
+   #* ----------
+   #*
+   #* Methods
+   #* ----------
+   #*
+   '''
+    def __init__(
+        self
+    ):
+        super().__init__()
+
+class NSGAII(GA):
+    '''
+   #* NSGA-ii algorithm which is developed
+   #* to solve multi objective optimization task
+   #* Attributes
+   #* ----------
+   #*
+   #* Methods
+   #* ----------
+   #*
+   '''
+    def __init__(
+        self,
+        core: list,
+        fuel_map: list,
+        objective_keys: list,
+        **kwargs:dict
+    ):
+        super().__init__(core, fuel_map, **kwargs)
+        self.objective_keys = objective_keys
+
+
+    def _check_dominance(
+        self,
+        a,  #* first soulution
+        b   #* second solution
+    ):
+        a_counter, b_counter = 0, 0
+
+        for ok in self.objective_keys:
+            if a[ok] >= b[ok]:
+                b_counter += 1
+            else:
+                a_counter += 1
+
+        if a_counter == 0:
+            return True  #* a dominates b
+        elif b_counter == 0:
+            return False #* b dominates a
+
+        #* neither a or b dominates
+        return "NoDominance"
+    
+    def nondominated_sorting(
+        self,
+        R  #* copy of R
+    ):
+        '''
+        #* Method description
+        #* Parameters
+        #* ----------
+        #*
+        #* Raises
+        #* ----------
+        #*
+        #* Returns
+        #* ----------
+        #*
+        '''
+        S = {}
+        F1 = []  #* First front - NonDominatedSolutions
+        for numa in range(len(R)):
+            S[
+                R[numa]["id"]
+            ] = defaultdict(list)
+            Sa = []   #* solutions dominated by a --> a = R[numa]
+            nb = 0    #* counter of nondominations of a (domination of b under a otherwise)
+            R[numa]["nb"] = 0
+            for numb in range(len(R)):
+                
+                if R[numa]["id"] == R[numb]["id"]:
+                    continue
+                
+                dominance = self._check_dominance(
+                    R[numa],
+                    R[numb],
+                )
+                if dominance == True:
+                    Sa.append(
+                        R[numb]
+                    )
+                elif dominance == False:
+                    nb += 1
+                    R[numa]["nb"] += 1
+            S[
+                R[numa]["id"]
+            ]["nb"] = nb
+            
+            if nb == 0:
+                F1.append(
+                    R[numa].copy()
+                )
+            
+            S[
+                R[numa]["id"]
+            ]["Sa"] = Sa
+
+        
+        #* start of fronts sorting
+        i = 1  #* fronts counter
+        #* Fronts storage
+        F = {
+            i: F1.copy()
+        }
+        run = True
+        while run:
+            N = []
+            for a in F[i]:
+                for numb in range(len(S[a["id"]]["Sa"])):
+                    S[a["id"]]["Sa"][numb]["nb"] -= 1
+                    # print(S[a["id"]]["Sa"][numb]["nb"])
+                    if S[a["id"]]["Sa"][numb]["nb"] == 0:
+                        N.append(
+                            S[a["id"]]["Sa"][numb].copy()
+                        )
+                    
+            if len(N) == 0:
+                break
+            i += 1
+            F[i] = N.copy()
+
+        pf_size = len([j for i in F.values() for j in i])
+        if pf_size < self.population_size:
+            raise ValueError(f"Number of individuals in Pareto Fronts ({pf_size}) less than population size {self.population_size}")
+        
+        return S, F
+
+    def _get_objective_scores_array(
+        self,
+        individuals:list, 
+        key:str
+    ):
+        return [
+            i[key]
+            for i in individuals
+        ]
+
+    def _get_initial_scores_indexes(
+        self,
+        unsorted_arr:list,
+        sorted_arr:list
+    ):
+        unsorted_inds = []
+        for o in range(len(unsorted_arr)):
+            unsorted_ind = []
+            for _, i in enumerate(sorted_arr[o]):
+                for nj, j in enumerate(unsorted_arr[o]):
+                    if i == j and not nj in unsorted_ind:
+                        unsorted_ind.append(nj)
+
+            unsorted_inds.append(unsorted_ind)
+        return unsorted_inds
+
+    def crowded_distance_selection(
+        self,
+        individuals: list,
+        to_select: int
+    ):
+        '''
+        #* Crowded distance computation
+        #* Parameters
+        #* ----------
+        #*
+        #* Raises
+        #* ----------
+        #*
+        #* Returns
+        #* ----------
+        #*
+        '''
+        objectives = [
+            self._get_objective_scores_array(individuals, obj_key)
+            for obj_key in self.objective_keys
+        ]
+        sorted_objectives = [
+            sorted(i.copy())
+            for i in objectives
+        ]
+
+        true_objectives_inds = self._get_initial_scores_indexes(
+            objectives,
+            sorted_objectives
+        )
+
+        #* distances computation
+        cds = np.full(
+                (len(objectives[0]),),
+                0.0
+            )
+        for n, obj in enumerate(sorted_objectives):
+            cds_obj = np.full(
+                (len(obj),),
+                0.0
+            )
+            for obj_val_ind in range(1, len(obj)-1):  #* boundaries are out of iteration
+                cds_obj[obj_val_ind] += obj[obj_val_ind + 1] - obj[obj_val_ind - 1]
+            
+            #* But now to populate cds we need to sort cds_obj by original_indexed
+            #* This is neccessary to get distance that binded to individual
+            cds += cds_obj[true_objectives_inds[n]]
+
+        #* after distances for every objective computated we can select ones with highest cd
+        cds_sorted_cut = cds[np.argsort(cds)[::-1]][:to_select]
+
+        true_cds_inds = []
+        cds = list(cds)
+        for cd in cds_sorted_cut:
+            for n, ucd in enumerate(cds):
+                if cd == ucd and not n in true_cds_inds:
+                    true_cds_inds.append(n)
+        
+        # #! it is not good soulution but ....
+        # if len(true_cds_inds) > to_select:
+        #     true_cds_inds[:to_select]
+
+        print(true_cds_inds)
+        true_cds_inds = np.asarray(true_cds_inds)
+        individuals = list(np.asarray(individuals)[true_cds_inds])
+
+        return individuals
+
+
+    def search(
+        self, 
+        generations: int = 100, 
+        max_generations: int = 500, 
+        ind_score: float = 0.95, 
+        population_score: float = 0.9,
+        maxtime_limit:int = 180
+    ):
+        #* population of chromosomes generated from given ancestor
+        #* sorted by score
+        population = self.make_population()
+        
+        score_population = self._get_population_average(population, 'fitness_score')
+        print(
+            f"start search with populations score: {score_population}"
+            + f"and burnup {self._get_population_average(population, 'core_burnup')}"
+        )
+
+        tot_time = 0
+        search = True
+        generation = 1
+        
+        try:
+            while search:
+
+                if population[0]["fitness_score"] >= ind_score \
+                    or score_population >= population_score:
+                    print(population[0]["fitness_score"])
+                    break
+                elif generations >= max_generations:
+                    break
+                elif generation == generations and generations < max_generations:
+                    generations += 10
+                
+                elif tot_time >= maxtime_limit:
+                    break
+
+                st_time = time.time()
+                
+                #* saving best solution
+                self._best_per_iter.append(
+                    population[0].copy()
+                )
+
+                self._aver_score_per_iter.append(
+                    self._get_population_average(population, 'fitness_score')
+                )
+
+                next_generation = []
+                population_burnup = self._get_population_average(population, "core_burnup")
+                
+
+                #* fresh fuel mutation part
+                #* replacing of chromosome is correct here
+                fresh_fuel_mutation_number = math.ceil(
+                    self._initilize_fresh_fuel_probability_exp(population_burnup)
+                    *len(population)
+                )
+
+                to_fresh_fuel_mutation = random.sample(
+                    population,
+                    k=fresh_fuel_mutation_number
+                )
+
+                for chromo in to_fresh_fuel_mutation:
+                    fresh_chromo = self.fresh_fuel_mutation(chromo)
+                    population = self._replace_chromosomes(
+                        population,
+                        fresh_chromo
+                    )
+                
+                
+                #* doubles current population size
+                #* it's made to produce Q size array of offsprings
+                #* Q size == population size
+                doubled_population = [
+                    *population.copy(),
+                    *population.copy(),
+                ]
+                #* choices method allows repetitions in return
+                #* list is shuffled
+                to_mate_chromosomes = random.choices(
+                    doubled_population,
+                    k=len(doubled_population)
+                )
+                parents_split = int(len(population)/2)
+                
+                #* array of offsprings
+                Q = []
+                #todo can be speeded up
+                with ProcessPoolExecutor(max_workers=self.workers) as executor:
+                    ps = tuple(zip(
+                        to_mate_chromosomes[ :parents_split], 
+                        to_mate_chromosomes[parents_split: ]
+                    ))
+                    ps_futures = [
+                        executor.submit(self.mate, p1.copy(), p2.copy()) for p1, p2 in ps
+                    ]
+                    
+                    for ps_future, (p1, p2) in zip(concurrent.futures.as_completed(ps_futures), ps):
+                        offspring = ps_future.result()
+                        # print(offspring)
+                        
+                        with lock:
+                            if offspring is None:
+                                continue
+                            
+                            Q.append(offspring)
+                                
+                #*** permutation mutation part
+                #! to correctly modify it
+                #! total number of offsprings must be like:
+                #! offsprings_crossover + offsprings_mutation = Q size 
+                permutation_mutation_number = math.ceil(
+                    self._initilize_mutation_probability(generation)
+                    *len(population)
+                )
+
+                to_permutate_chromosomes = random.sample(
+                    population,
+                    k=permutation_mutation_number
+                )
+
+                for chromo in to_permutate_chromosomes:
+                    mutated_chromo = self.permutation_mutation(chromo)
+                    population = self._replace_chromosomes(
+                        population,
+                        mutated_chromo
+                    )
+
+                
+
+                #* joint array of population and offsrings
+                R = [*population, *Q]
+                
+                #* Do NSGA-ii
+                S, F = self.nondominated_sorting(R)
+                #* F1 + F2 passes next as elites
+                iter_st = 1
+                if len(F[1]) <= self.population_size:
+                    next_generation.extend(
+                        F[1]
+                    )
+                    iter_st += 1
+
+
+                #* before start with crowding distance selection (cds)
+                #* selects all fronts until condition:
+                #* len(next_generation) + len(F[i]) > len(population) triggers
+                #* So cds applies on F[i] that triggers condition
+                
+                for i in range(iter_st, len(F.keys())):
+                    slots_left = self.population_size - len(next_generation)
+                    with_new_front_size = len(next_generation) + len(F[i])
+                    
+                    if slots_left == 0:
+                        break
+                    elif with_new_front_size > self.population_size:
+                        #* select best individuals with less crowded distance
+                        indiv_cds = self.crowded_distance_selection(F[i], slots_left)[:slots_left]
+                        print("slots left: ", slots_left, "cd_returned: ", len(indiv_cds))
+                        next_generation.extend(indiv_cds)
+                        if len(next_generation) != self.population_size:
+                            raise ValueError(
+                                f"{len(next_generation)} not equal to {self.population_size}"
+                            )
+                        break
+                    next_generation.extend(F[i])
+
+                population = next_generation.copy()
+                #* old sort by fitness_score
+                population.sort(reverse=True, key=self._fitness_score)
+
+                score_population = self._get_population_average(population, 'fitness_score')
+                burnup_population = self._get_population_average(population, 'core_burnup')
+                print(f"average populations score {score_population}"
+                + f" and burnup {burnup_population} at the end of {generation} generation")
+                
+
+                generation += 1
+
+                fn_time = time.time() - st_time
+                print("Time taken for iteration: ", fn_time)
+                tot_time += fn_time 
+                
 
         except KeyboardInterrupt:
             #* returns population whenever KeyboardInterrupt raises

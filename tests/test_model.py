@@ -2,9 +2,10 @@ from audioop import reverse
 from re import M
 import pytest
 import numpy as np
+import joblib
+import os
 
-
-from main.model import GA, Individual
+from main.model import GA, Individual, NSGAII
 
 fuel_map = [
     300,
@@ -94,11 +95,11 @@ chromo1 = {
 chromo2 = {
     'id': 4, 
     'fuels_gnome': 
-        [
+        np.asarray([
             14.28, 42.8 , 56.55, 49.02, 38.23, 37.67, 11.55, 22.21, 51.15,
             0.0  , 16.42, 40.88, 35.61, 10.12, 39.14, 20.31, 37.64, 57.33,
             39.41, 32.79
-    ], 
+    ]), 
     'core_burnup': 32.7, 
     'permutations_made': 10, 
     'p_margin': 5.160896165530887, 
@@ -170,7 +171,7 @@ fresh_fuel_test_3 =  {
 @pytest.fixture
 def ga():
     return GA.no_fuel_mask(
-        core=fresh_fuel_test_3['fuels_gnome'],
+        core=chromo1['fuels_gnome'],
         fuel_map=fuel_map,
         population_size=40,
         full_symmetry=False,
@@ -207,12 +208,14 @@ def test_fresh_fuel_mutation(ga):
     assert 0
 
 def test_mate(ga):
+    print(chromo1)
     res = ga.mate(
         chromo1,
         chromo2
     )
     print(res)
-    assert float("{:.1f}".format(res.mean())) == chromo1["core_burnup"]
+    assert float("{:.1f}".format(res["fuels_gnome"].mean())) == chromo1["core_burnup"] == chromo2["core_burnup"]
+    assert 0
 
 def test_replace_chromosome(ga):
     population = ga.make_population()
@@ -299,4 +302,43 @@ def test_initialize_chromosome(indiv):
     mutated = indiv.fuels_gnome_mutation(core)
     res = indiv.initialize_chromosome(mutated, 0)
     print(res)
+    assert 0
+
+
+nds_data_path = os.path.join(
+    os.path.split(
+        os.path.dirname(__file__)
+    )[0],
+    "main",
+    "trained_population_129_data_for_nsgaii_300ps.joblib"
+)
+print(nds_data_path)
+nds_data = joblib.load(nds_data_path)
+
+@pytest.fixture
+def nsgaii():
+    return NSGAII.no_fuel_mask(
+        core=fresh_fuel_test_3['fuels_gnome'],
+        fuel_map=fuel_map,
+        objective_keys = ["k_sym", "k_quarter", "k_left_right"],
+        population_size=50,
+        full_symmetry=False,
+        workers=4
+    )
+    
+def test_nsgaii_make_population(nsgaii):
+    res = nsgaii.make_population()
+    print(res)
+    assert 0
+
+def test_nds(nsgaii):
+    
+    s, f = nsgaii.nondominated_sorting(nds_data.copy())
+    # print(f, f.keys())
+    total_solutions = np.asarray([len(i) for i in f.values()]).sum()
+    assert len(nds_data) == total_solutions
+
+    selected = nsgaii.crowded_distance_selection(f[3], 15)
+    print(selected)
+    assert len(selected) == 15
     assert 0
