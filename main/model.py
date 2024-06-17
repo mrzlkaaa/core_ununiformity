@@ -941,8 +941,7 @@ class GA:
         #     raise ValueError("Offspring generated after matting has missing FAs")
         
         offspring_chromosome = self.indiv.initialize_chromosome(
-            offspring,
-            # 0  #! bug ONLY for GA
+            offspring
         )
 
         if not offspring_chromosome["core_burnup"] == chromosome1["core_burnup"]:
@@ -1128,18 +1127,21 @@ class GA:
                                 continue
                             
                             
-                            family = [
-                                p1.copy(),
-                                p2.copy(),
-                                offspring    
-                            ]
+                        population.append(
+                            offspring
+                        )
+                            # family = [
+                            #     p1.copy(),
+                            #     p2.copy(),
+                            #     offspring    
+                            # ]
                             
-                            best_in_family = self.mate_tournament_selection(family)
+                            # best_in_family = self.mate_tournament_selection(family)
                             
-                            population = self._replace_chromosomes(
-                                population,
-                                best_in_family
-                            )
+                            # population = self._replace_chromosomes(
+                            #     population,
+                            #     best_in_family
+                            # )
                                 
                 #*** permutation mutation part
                 permutation_mutation_number = math.ceil(
@@ -1177,9 +1179,19 @@ class GA:
                         fresh_chromo
                     )
                 
-                new_generation.extend(population)
+                #* sort by score
+                population.sort(reverse=True, key=self._fitness_score)
+
+                #* pass rest of the best individuals to the next gen
+                new_generation.extend(
+                    population[
+                        : (self.population_size - len(new_generation))
+                    ]
+                )
+                
                 population = new_generation
 
+                #* sort by score
                 population.sort(reverse=True, key=self._fitness_score)
 
                 score_population = self._get_population_average(population, 'fitness_score')
