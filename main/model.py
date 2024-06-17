@@ -88,7 +88,8 @@ class Individual:
         self,
         fuel_map,
         dynamic_fuels_gnome_ind,
-        fitness_weights: dict | None = None
+        fitness_weights: dict | None = None,
+        fitness_score_code: str = "soo"
     ):
         self.fuel_map = fuel_map
         #* it's array of indexes where 8th tube FA is installed
@@ -96,7 +97,13 @@ class Individual:
 
         self.fitness_weights = fitness_weights if fitness_weights \
             else FITNESS_WEIGHTS_WINDOW
+
+        self.fs_code = fitness_score_code   #* sso or nsgaii
         
+    # def _get_fs_code(self, fitness_score_code):
+    #     match fitness_score_code.upper():
+    #         case "SOO":
+    #             return "fitness_score_sso"
 
     @property
     def dynamic_fuels_gnome_ind(self):
@@ -441,17 +448,30 @@ class Individual:
         k_sided_norm = np.exp( ( k_sided_norm - 1) )
 
 
-        return (
-            p_margin_norm * cls.fitness_weights["p_margin"]\
-            + k_fa_max_norm * cls.fitness_weights["k_fa_max"]\
-            + k_quarter_norm * cls.fitness_weights["k_quarter"]\
-            + k_sym_norm * cls.fitness_weights["k_sym"]\
-            + k_sided_norm * cls.fitness_weights["k_sided"],
-            p_margin_norm,
-            k_fa_max_norm,
-            k_quarter_norm,
-            k_sym_norm
-        )
+        match cls.fs_code:
+            case "soo":
+                return (
+                    p_margin_norm * cls.fitness_weights["p_margin"]\
+                    + k_fa_max_norm * cls.fitness_weights["k_fa_max"]\
+                    + k_quarter_norm * cls.fitness_weights["k_quarter"]\
+                    + k_sym_norm * cls.fitness_weights["k_sym"]\
+                    + k_sided_norm * cls.fitness_weights["k_sided"],
+                    p_margin_norm,
+                    k_fa_max_norm,
+                    k_quarter_norm,
+                    k_sym_norm
+                )
+            case "nsgaii":
+                return (
+                    ( p_margin_norm * 0.10 + k_fa_max_norm * 0.10 \
+                    + np.mean( [ k_quarter_norm, k_sym_norm, k_sided_norm ] ) ) / 1.2,\
+                    p_margin_norm,
+                    k_fa_max_norm,
+                    k_quarter_norm,
+                    k_sym_norm
+                )
+
+        
 
 #! provide max_worker argument
 #* this will speed up the prediction models work
@@ -466,6 +486,7 @@ class GA:
         core: list,  #* it's array size of 20
         fuel_map: list,  #* map shows where 8th/6th tube FA are installed
         population_size: int = 100,
+        fitness_score_code:str = "soo",
         refuel_only: list | None = None,  #* restrict cells avaliable for refueling
         full_symmetry: bool = True,  #* allows refueling for pairwised cells only
         mutation_probabilty_fresh_fuel: float = 0.1,
@@ -485,9 +506,10 @@ class GA:
         self.workers = workers
 
         self.indiv = Individual(
-            fuel_map,
-            self.dynamic_fuels_gnome_ind,
-            fitness_weights
+            fuel_map = fuel_map,
+            dynamic_fuels_gnome_ind = self.dynamic_fuels_gnome_ind,
+            fitness_weights = fitness_weights,
+            fitness_score_code = fitness_score_code
         )
         #* find and store values in a given cells
         #* to refuel exactly given one
@@ -920,6 +942,7 @@ class GA:
         
         offspring_chromosome = self.indiv.initialize_chromosome(
             offspring,
+            # 0  #! bug ONLY for GA
         )
 
         if not offspring_chromosome["core_burnup"] == chromosome1["core_burnup"]:
@@ -1005,7 +1028,7 @@ class GA:
             mutated_cores = [self.indiv.fuels_gnome_mutation(self.ancestor_core) for _ in range(self.population_size)]
             # print(mutated_cores)
             futures = [
-                executor.submit(self.indiv.initialize_chromosome, mutated_fuels_gnome) for _, mutated_fuels_gnome in enumerate(mutated_cores)
+                executor.submit(self.indiv.initialize_chromosome, mutated_fuels_gnome, i) for i, mutated_fuels_gnome in enumerate(mutated_cores)
             ]
             for future in as_completed(futures):
                 
@@ -1180,9 +1203,6 @@ class GA:
 
 
 
-
-
-
 class SimpleGA(GA):
     '''
    #* Simple Genetic Algorithm which is developed
@@ -1215,9 +1235,15 @@ class NSGAII(GA):
         core: list,
         fuel_map: list,
         objective_keys: list,
+        fitness_score_code:str = "nsgaii",
         **kwargs:dict
     ):
-        super().__init__(core, fuel_map, **kwargs)
+        super().__init__(
+            core = core, 
+            fuel_map = fuel_map, 
+            fitness_score_code = fitness_score_code, 
+            **kwargs
+        )
         self.objective_keys = objective_keys
 
 
@@ -1296,7 +1322,6 @@ class NSGAII(GA):
                 R[numa]["id"]
             ]["Sa"] = Sa
 
-        
         #* start of fronts sorting
         i = 1  #* fronts counter
         #* Fronts storage
@@ -1308,6 +1333,7 @@ class NSGAII(GA):
             N = []
             for a in F[i]:
                 for numb in range(len(S[a["id"]]["Sa"])):
+                    # if S[a["id"]]["Sa"][numb]["nb"] > 0:
                     S[a["id"]]["Sa"][numb]["nb"] -= 1
                     # print(S[a["id"]]["Sa"][numb]["nb"])
                     if S[a["id"]]["Sa"][numb]["nb"] == 0:
@@ -1319,10 +1345,15 @@ class NSGAII(GA):
                 break
             i += 1
             F[i] = N.copy()
-
-        pf_size = len([j for i in F.values() for j in i])
-        if pf_size < self.population_size:
-            raise ValueError(f"Number of individuals in Pareto Fronts ({pf_size}) less than population size {self.population_size}")
+        
+        pfs = [j for i in F.values() for j in i]
+        print(len(pfs), len(F.keys()), len(S))
+        # if len(pfs) < self.population_size:
+        #     # for pf in pfs:
+        #     #     for s in S:
+        #     #         if 
+        #     # print(F[1])
+        #     raise ValueError(f"Number of individuals in Pareto Fronts ({len(pfs)}) less than population size {self.population_size}")
         
         return S, F
 
@@ -1471,8 +1502,12 @@ class NSGAII(GA):
 
                 next_generation = []
                 population_burnup = self._get_population_average(population, "core_burnup")
-                
 
+                # best_fit_number = math.ceil(self.elitism*len(population))
+                # next_generation.extend(population[:best_fit_number])
+                # population = population[best_fit_number: ]
+
+                                
                 #* fresh fuel mutation part
                 #* replacing of chromosome is correct here
                 fresh_fuel_mutation_number = math.ceil(
@@ -1491,45 +1526,40 @@ class NSGAII(GA):
                         population,
                         fresh_chromo
                     )
-                
-                
-                #* doubles current population size
-                #* it's made to produce Q size array of offsprings
-                #* Q size == population size
-                doubled_population = [
-                    *population.copy(),
-                    *population.copy(),
-                ]
-                #* choices method allows repetitions in return
-                #* list is shuffled
-                to_mate_chromosomes = random.choices(
-                    doubled_population,
-                    k=len(doubled_population)
-                )
-                parents_split = int(len(population)/2)
+
                 
                 #* array of offsprings
                 Q = []
                 #todo can be speeded up
-                with ProcessPoolExecutor(max_workers=self.workers) as executor:
-                    ps = tuple(zip(
-                        to_mate_chromosomes[ :parents_split], 
-                        to_mate_chromosomes[parents_split: ]
-                    ))
-                    ps_futures = [
-                        executor.submit(self.mate, p1.copy(), p2.copy()) for p1, p2 in ps
-                    ]
-                    
-                    for ps_future, (p1, p2) in zip(concurrent.futures.as_completed(ps_futures), ps):
-                        offspring = ps_future.result()
-                        # print(offspring)
+
+                for _ in range(2):
+                    to_mate_chromosomes = random.choices(
+                        population,
+                        k=len(population)
+                    )
+                    random.shuffle(to_mate_chromosomes)
+                    parents_split = int(len(population)/2)
+
+                    with ProcessPoolExecutor(max_workers=self.workers) as executor:
+                        ps = tuple(zip(
+                            to_mate_chromosomes[ :parents_split], 
+                            to_mate_chromosomes[parents_split: ]
+                        ))
+                        ps_futures = [
+                            executor.submit(self.mate, p1.copy(), p2.copy()) for p1, p2 in ps
+                        ]
                         
-                        with lock:
-                            if offspring is None:
-                                continue
+                        for ps_future, (p1, p2) in zip(concurrent.futures.as_completed(ps_futures), ps):
+                            offspring = ps_future.result()
+                            # print(offspring)
                             
-                            Q.append(offspring)
+                            with lock:
+                                if offspring is None:
+                                    continue
                                 
+                                Q.append(offspring)
+                                
+                
                 #*** permutation mutation part
                 #! to correctly modify it
                 #! total number of offsprings must be like:
@@ -1555,40 +1585,53 @@ class NSGAII(GA):
 
                 #* joint array of population and offsrings
                 R = [*population, *Q]
-                
+                print("2x population: ", len(R))
                 #* Do NSGA-ii
-                S, F = self.nondominated_sorting(R)
+                S, F = self.nondominated_sorting(R.copy())
                 #* F1 + F2 passes next as elites
+
+                slots_left = self.population_size - len(next_generation)
                 iter_st = 1
-                if len(F[1]) <= self.population_size:
+                if len(F[1]) <= slots_left:
                     next_generation.extend(
                         F[1]
                     )
                     iter_st += 1
-
+                
 
                 #* before start with crowding distance selection (cds)
                 #* selects all fronts until condition:
                 #* len(next_generation) + len(F[i]) > len(population) triggers
                 #* So cds applies on F[i] that triggers condition
                 
-                for i in range(iter_st, len(F.keys())):
-                    slots_left = self.population_size - len(next_generation)
-                    with_new_front_size = len(next_generation) + len(F[i])
-                    
-                    if slots_left == 0:
-                        break
-                    elif with_new_front_size > self.population_size:
-                        #* select best individuals with less crowded distance
-                        indiv_cds = self.crowded_distance_selection(F[i], slots_left)[:slots_left]
-                        print("slots left: ", slots_left, "cd_returned: ", len(indiv_cds))
-                        next_generation.extend(indiv_cds)
-                        if len(next_generation) != self.population_size:
-                            raise ValueError(
-                                f"{len(next_generation)} not equal to {self.population_size}"
-                            )
-                        break
-                    next_generation.extend(F[i])
+                if len(F) > 1:
+                    for i in range(iter_st, len(F.keys())):
+                        slots_left = self.population_size - len(next_generation)
+                        with_new_front_size = len(next_generation) + len(F[i])
+                        if slots_left <= 0:
+                            break
+                        elif with_new_front_size > self.population_size:
+                            
+                            #* select best individuals with less crowded distance
+                            indiv_cds = self.crowded_distance_selection(F[i], slots_left)[:slots_left]
+                            print("slots left: ", slots_left, "cd_returned: ", len(indiv_cds))
+                            next_generation.extend(indiv_cds)
+                            if len(next_generation) != self.population_size:
+                                raise ValueError(
+                                    f"{len(next_generation)} not equal to {self.population_size}"
+                                )
+                            break
+
+                        next_generation.extend(F[i])
+                    print("next_gen_size: ", len(next_generation))
+                        
+                else:
+                    #* THere is only 1 front so we do sort it by fs
+                    #* and pass best ones to next gen cuz we cannot use cds
+                    R.sort(reverse=True, key=self._fitness_score)
+                    next_generation.extend(R[:slots_left])
+                
+
 
                 population = next_generation.copy()
                 #* old sort by fitness_score
