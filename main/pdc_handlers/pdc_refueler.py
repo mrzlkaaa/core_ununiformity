@@ -366,7 +366,7 @@ class PDCHandler:
         #* ----------
         #*  None
         '''
-
+        os.chdir(os.path.dirname(__file__))
         stored_data = pd.read_excel(self.CELLS_DATA_STORAGE, index_col="u5_aver")
         
         stored_burnups = stored_data.index
